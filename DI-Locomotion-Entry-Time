@@ -1,0 +1,537 @@
+#Import libraries
+
+import pandas as pd
+import os
+#import deeplabcut
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+from collections import namedtuple
+from scipy.spatial import distance
+from pathlib import Path
+
+#set directory
+# data_dir = "/Users/eloisefunnell/Downloads/OPL_Final"
+data_dir = r"C:\Users\kail\Downloads\OPL_Final"
+
+mouse_ids = [f for f in os.listdir(data_dir) if (os.path.isdir(os.path.join(data_dir, f)))]
+
+print(mouse_ids)
+
+
+#import data
+mouse = 'm03'
+session = '1'
+group = 'app'
+
+#function to read DLC csv files as df reproducibly 
+def read_session_csv(data_dir, mouse_id, session_date):
+    session_path = os.path.join(data_dir, mouse_id, session_date)
+    session_files = [f for f in os.listdir(session_path) if (f.endswith(".csv"))]
+    session_csv = os.path.join(session_path, session_files[0])
+    df = pd.read_csv(session_csv, header=[1,2], index_col=0)
+    df.name = mouse_id+"_"+session_date
+    return df
+#if session 1, leave as 'left' and 'right'
+left_obj = 'left' 
+right_obj = 'right'
+
+# #if session 2, note which object has been moved otherwise na
+# familiar = 'right'
+# novel = 'left'
+
+#if session 2, note which object has been moved otherwise na
+familiar = 'left'
+novel = 'right'
+
+sess_df = read_session_csv(data_dir, mouse, session)
+
+#run rest of script + output csv will be saved with behaviour summary for animal 
+sess_df.head()
+
+#select body parts to track
+
+bps_first=sess_df.columns.get_level_values(0)
+bps_to_plot=['nose', 'objectA', 'objectB']
+
+
+sess_df.head()
+
+#define ROIs, selecting coordinates with high likelihood and setting scale 
+objR = sess_df['objectB'][sess_df['objectB','likelihood'] > 0.9].mean()
+objL = sess_df['objectA'][sess_df['objectA','likelihood'] > 0.9].mean()
+objR = sess_df['objectB'][sess_df['objectB','x'] >= sess_df['objectB','x'].quantile(0.1)].mean()
+objR = sess_df['objectB'][sess_df['objectB','y'] >= sess_df['objectB','y'].quantile(0.1)].mean()
+objL = sess_df['objectA'][sess_df['objectA','x'] <= sess_df['objectA','x'].quantile(0.9)].mean()
+objL = sess_df['objectA'][sess_df['objectA','y'] <= sess_df['objectA','y'].quantile(0.9)].mean()
+
+objR.name = 'Right'
+objL.name = 'Left'
+
+objs = [objL, objR]
+
+# Calculate the 25th and 75th percentile for object B's X and Y coordinates
+factor = 0.01
+
+
+# Calculate the 25th and 75th percentile for object B's X and Y coordinates
+q5 = sess_df['objectA'][['x', 'y']].quantile(factor)
+q95 = sess_df['objectA'][['x', 'y']].quantile(1-factor)
+
+# Define the lower and upper bounds for object B's X and Y coordinates
+x_lower = q5['x']
+x_upper = q95['x']
+y_lower = q5['y']
+y_upper = q95['y']
+
+# Drop values outside the lower and upper bounds for object B's X and Y coordinates
+sess_df = sess_df.drop(sess_df[(sess_df['objectA', 'x'] < x_lower) |
+                                (sess_df['objectA', 'x'] > x_upper) |
+                                (sess_df['objectA', 'y'] < y_lower) |
+                                (sess_df['objectA', 'y'] > y_upper)].index)
+
+# Calculate the 25th and 75th percentile for object B's X and Y coordinates
+q5 = sess_df['objectB'][['x', 'y']].quantile(factor)
+q95 = sess_df['objectB'][['x', 'y']].quantile(1-factor)
+
+# Define the lower and upper bounds for object B's X and Y coordinates
+x_lower = q5['x']
+x_upper = q95['x']
+y_lower = q5['y']
+y_upper = q95['y']
+
+# Drop values outside the lower and upper bounds for object B's X and Y coordinates
+sess_df = sess_df.drop(sess_df[(sess_df['objectB', 'x'] < x_lower) |
+                                (sess_df['objectB', 'x'] > x_upper) |
+                                (sess_df['objectB', 'y'] < y_lower) |
+                                (sess_df['objectB', 'y'] > y_upper)].index)
+
+
+#object sizes (px and cm) measured using box and video dimensions - for mpv4 control group 
+scale = 49.5/378
+objwidth_cm = 3.9
+analysis_radius_cm = 3
+boxlength_cm = 49.5
+boxlength_px = 378
+boxwidth_cm = 30
+boxwidth_px = 225
+objwidth_px = objwidth_cm/scale 
+analysis_radius_px = analysis_radius_cm/scale
+total_radius_px = analysis_radius_px + objwidth_px
+print(total_radius_px)
+
+# #object sizes (px and cm) measured using box and video dimensions - for APP group 
+# objwidth_px = 20
+# objwidth_cm = 3.9
+# scale = 3.9/20
+# analysis_radius_cm = 3
+# analysis_radius_px = analysis_radius_cm/scale
+# total_radius_px = analysis_radius_px + objwidth_px
+# boxlength_cm = 49.5
+# boxlength_px = boxlength_cm/scale
+# boxwidth_cm = 30
+# boxwidth_px = boxwidth_cm/scale
+# print(total_radius_px)
+
+# 
+#visualise movement of selected body parts
+
+def get_cmap(n, name='plasma'):
+    return plt.cm.get_cmap(name, n)
+
+def Histogram(vector,color,bins):
+    dvector=np.diff(vector)
+    dvector=dvector[np.isfinite(dvector)]
+    plt.hist(dvector,color=color,histtype='step',bins=bins)
+
+def PlottingResults(sess_df,bps_to_plot,alphavalue=.3,pcutoff=.9,colormap='Paired',fs=(3,4)):
+    ''' Plots poses vs time; pose x vs pose y; histogram of differences and likelihoods.'''
+    plt.figure(figsize=fs)
+    colors = get_cmap(len(bps_to_plot),name = colormap)
+    scorer=sess_df.columns.get_level_values(0)[0] #you can read out the header to get the scorer name!
+    plt.xlabel('x coordinate')
+    plt.ylabel('y coordinate')
+
+    for bpindex, bp in enumerate(bps_to_plot):
+        Index=sess_df[bp]['likelihood'].values > pcutoff
+        plt.plot(sess_df[bp]['x'].values[Index],sess_df[bp]['y'].values[Index],'.',color=colors(bpindex),alpha=alphavalue)
+
+    plt.gca().invert_yaxis()
+    plt.savefig(os.path.join(data_dir,"trajectory"+mouse + session))
+# 
+    sm = plt.cm.ScalarMappable(cmap=plt.get_cmap(colormap), norm=plt.Normalize(vmin=0, vmax=len(bps_to_plot)-1))
+    sm._A = []
+    cbar = plt.colorbar(sm,ticks=range(len(bps_to_plot)))
+    cbar.set_ticklabels(bps_to_plot)
+    plt.figure(figsize=fs)
+    Time=np.arange(np.size(sess_df[bps_to_plot[0]]['x'].values))
+    plt.savefig(os.path.join(data_dir,"trajectory"+mouse + session))
+
+    for bpindex, bp in enumerate(bps_to_plot):
+        Index=sess_df[bp]['likelihood'].values > pcutoff
+        plt.plot(Time[Index],sess_df[bp]['x'].values[Index],'--',color=colors(bpindex),alpha=alphavalue)
+        plt.plot(Time[Index],sess_df[bp]['y'].values[Index],'-',color=colors(bpindex),alpha=alphavalue)       
+        
+    sm = plt.cm.ScalarMappable(cmap=plt.get_cmap(colormap), norm=plt.Normalize(vmin=0, vmax=len(bps_to_plot)-1))
+    sm._A = []
+    cbar = plt.colorbar(sm,ticks=range(len(bps_to_plot)))
+    cbar.set_ticklabels(bps_to_plot)
+    plt.xlabel('Frame index')
+    plt.ylabel('X and y-position in pixels')
+    #plt.savefig(os.path.join(tmpfolder,"plot"+suffix))
+
+    plt.figure(figsize=fs)
+    for bpindex, bp in enumerate(bps_to_plot):
+        Index=sess_df[bp]['likelihood'].values > pcutoff
+        plt.plot(Time,sess_df[bp]['likelihood'].values,'-',color=colors(bpindex),alpha=alphavalue)
+
+    sm = plt.cm.ScalarMappable(cmap=plt.get_cmap(colormap), norm=plt.Normalize(vmin=0, vmax=len(bps_to_plot)-1))
+    sm._A = []
+    cbar = plt.colorbar(sm,ticks=range(len(bps_to_plot)))
+    cbar.set_ticklabels(bps_to_plot)
+    plt.xlabel('Frame index')
+    plt.ylabel('likelihood')
+
+    #plt.savefig(os.path.join(tmpfolder,"plot-likelihood"+suffix))
+
+    plt.figure(figsize=fs)
+    bins=np.linspace(0,np.amax(sess_df.max()),100)
+
+    for bpindex, bp in enumerate(bps_to_plot):
+        Index=sess_df[bp]['likelihood'].values < pcutoff
+        X=sess_df[bp]['x'].values
+        X[Index]=np.nan
+        Histogram(X,colors(bpindex),bins)
+        Y=sess_df[bp]['x'].values
+        Y[Index]=np.nan
+        Histogram(Y,colors(bpindex),bins)
+
+    sm = plt.cm.ScalarMappable(cmap=plt.get_cmap(colormap), norm=plt.Normalize(vmin=0, vmax=len(bps_to_plot)-1))
+    sm._A = []
+    cbar = plt.colorbar(sm,ticks=range(len(bps_to_plot)))
+    cbar.set_ticklabels(bps_to_plot)
+    plt.ylabel('Count')
+    plt.xlabel('DeltaX and DeltaY')
+    
+    #plt.savefig(os.path.join(tmpfolder,"hist"+suffix))
+
+
+# %matplotlib inline
+PlottingResults(sess_df,bps_to_plot,alphavalue=.75,pcutoff=.9,fs=(6,10))
+
+
+# plotting a heatmap using x and y correlation 
+plt.rcParams.update({
+    "figure.facecolor":  (1.0, 1.0, 1.0, 1),  # red   with alpha = 30%
+    "axes.facecolor":    (1.0, 1.0, 1.0, 1),  # green with alpha = 50%
+    "savefig.facecolor": (1.0, 1.0, 1.0, 1),  # blue  with alpha = 20%
+})
+plt.rcParams['savefig.dpi'] = 300
+
+bp = 'nose'
+ind = sess_df[bp] 
+heatmap_df = ind[~(ind['likelihood'] < 0.9)].drop(columns=['likelihood']) 
+f = plt.figure(figsize=(4,6))
+ax = f.subplots()
+sns.histplot(heatmap_df,x='x', y='y', cbar=True, ax=ax, binwidth=(15, 15), cmap='RdPu')
+circle1 = plt.Circle((objs[0]['x'],objs[0]['y']), total_radius_px, facecolor='none', edgecolor='black')
+circle2 = plt.Circle((objs[1]['x'],objs[1]['y']), total_radius_px, edgecolor='black', facecolor='none')
+circle11 = plt.Circle((objs[0]['x'],objs[0]['y']), objwidth_px,facecolor='none', edgecolor='black')
+circle22 = plt.Circle((objs[1]['x'],objs[1]['y']), objwidth_px, facecolor='none', edgecolor='black')
+ax.add_patch(circle1)
+ax.add_patch(circle2)
+ax.add_patch(circle11)
+ax.add_patch(circle22)
+ax.invert_yaxis()
+plt.xlabel('x coordinate')
+# ax.set_title('Heatmap of Nose Movement in Mouse ' + mouse + ' - Test Phase')
+ax.set_title('Heatmap of Nose Movement in Mouse ' )
+plt.ylabel('y coordinate')
+
+plt.savefig('MEL_2_heatmap_plot.png', transparent=False)
+
+#functions to identify chosen body parts within analysis radius
+def check_bp_in_circle(radius,center,bp_point):
+    if ((bp_point[0] - center[0])**2+(bp_point[1] - center[1])**2) <= (radius**2):
+        return True
+    else:
+        return False
+
+def frames_in_area(bp_df,area_settings):
+    if area_settings['type'] == 'circle':
+        in_area = []
+        for frame in bp_df.index:
+            in_area.append(check_bp_in_circle(area_settings['radius'],area_settings['center'], bp_df.loc[frame]))
+        bp_df['in'+area_settings['center'].name] = in_area
+        return bp_df
+    
+# 
+# Select body part for ROI analysis + create df of coordinates with high likelihood
+chosen_bp = 'nose'
+bp_df = sess_df[chosen_bp][sess_df[chosen_bp,'likelihood'] > 0.8][['x','y']]
+
+#check frame skips - if high adjust threshold or refine network 
+print(np.diff(bp_df.index).max())
+
+bp_df.head()
+
+# 
+#functions to identify chosen body parts within analysis radius
+def check_bp_in_circle(radius,center,bp_point):
+    if ((bp_point[0] - center[0])**2+(bp_point[1] - center[1])**2) <= (radius**2):
+        return True
+    else:
+        return False
+
+def frames_in_area(bp_df,area_settings):
+    if area_settings['type'] == 'circle':
+        in_area = []
+        for frame in bp_df.index:
+            in_area.append(check_bp_in_circle(area_settings['radius'],area_settings['center'], bp_df.loc[frame]))
+        bp_df['in'+area_settings['center'].name] = in_area
+        return bp_df
+
+import numpy as np
+
+def closest_point_on_circle(center, point, radius):
+    direction = point - center
+    direction_norm = np.linalg.norm(direction)
+    return center + (direction / direction_norm) * radius
+
+chosen_bp = 'nose'
+filtered_indices = sess_df[(sess_df[chosen_bp, 'likelihood'] > 0.9) &
+                           (sess_df['leftear', 'likelihood'] > 0.9) &
+                           (sess_df['rightear', 'likelihood'] > 0.9) &
+                           (sess_df['objectA', 'likelihood'] > 0.9) &
+                           (sess_df['objectB', 'likelihood'] > 0.9)].index
+
+bp_df = sess_df.loc[filtered_indices, (chosen_bp, ['x', 'y'])]
+object_a_df = sess_df.loc[filtered_indices, ('objectA', ['x', 'y'])]
+object_b_df = sess_df.loc[filtered_indices, ('objectB', ['x', 'y'])]
+left_ear_df = sess_df.loc[filtered_indices, ('leftear', ['x', 'y'])]
+right_ear_df = sess_df.loc[filtered_indices, ('rightear', ['x', 'y'])]
+
+
+# Calculate the vector difference between left ear and right ear
+ear_vector = np.array(left_ear_df) - np.array(right_ear_df)
+
+radius = 15
+
+# Compute the closest points on the circle around objectA and objectB to the nose coordinates
+closest_points_on_circle_a = np.array([closest_point_on_circle(center, point, radius) for center, point in zip(np.array(object_a_df), np.array(bp_df))])
+closest_points_on_circle_b = np.array([closest_point_on_circle(center, point, radius) for center, point in zip(np.array(object_b_df), np.array(bp_df))])
+
+# Calculate vector differences between the nose and the closest points on the circles around objectA and objectB
+nose_closest_point_vector_a = np.array(bp_df) - closest_points_on_circle_a
+nose_closest_point_vector_b = np.array(bp_df) - closest_points_on_circle_b
+
+# Calculate dot products
+dot_product_a = np.dot(ear_vector, nose_closest_point_vector_a.T)
+dot_product_b = np.dot(ear_vector, nose_closest_point_vector_b.T)
+
+# Select the nose data for further analysis if either dot product is 0
+selected_noses = bp_df[(dot_product_a == 0) | (dot_product_b == 0)]
+
+# Check frame skips - if high, consider adjusting the threshold or refining the network
+print(np.diff(bp_df.index).max())
+
+
+# sns.scatterplot(data=sess_df['objectB'], x="x", y="y", hue="likelihood")
+
+
+bp_df.head()
+
+
+#create df of frames where bodypart present in either ROI 
+fia_left = frames_in_area(bp_df, {'type':'circle', 'radius': total_radius_px, 'center':objs[0]})
+fia_right = frames_in_area(bp_df, {'type':'circle', 'radius': total_radius_px, 'center':objs[1]})
+
+fia_both = frames_in_area(bp_df, {'type':'circle', 'radius': total_radius_px, 'center':objs[1]})
+
+fia_left.to_csv("fia_left_Frames.csv")
+fia_right.to_csv("fia_right_Frames_Right.csv")
+
+
+fia_both["inLeft"] = fia_both["inLeft"].astype(int)
+fia_both["inRight"] = fia_both["inRight"].astype(int)
+
+# fia_both.to_csv("/Users/kail/Downloads/OPL_Final/m04_both.csv")
+
+fia_left
+
+#identify no. of 'frames in area' where body part was within ROI for at least 90 frames (1.5 seconds)
+
+#identify frames where body part present in ROI 
+fia_left['tag_l'] = fia_left['inLeft'] == 1
+fia_right['tag_r'] = fia_right['inRight'] == 1
+
+#first row is a True preceded by a False
+first_l = fia_left.index[fia_left['tag_l'] & ~ fia_left['tag_l'].shift(+1).fillna(False)]
+first_r = fia_right.index[fia_right['tag_r'] & ~ fia_right['tag_r'].shift(+1).fillna(False)]
+
+#last row is a True followed by a False
+last_l = fia_left.index[fia_left['tag_l'] & ~ fia_left['tag_l'].shift(-1).fillna(False)]
+last_r = fia_right.index[fia_right['tag_r'] & ~ fia_right['tag_r'].shift(-1).fillna(False)]
+
+#filter rows which are apart by 90 frames (1.5s) or more
+# pr_l = [(i, j) for i, j in zip(first_l, last_l) if j > i + 89]
+# pr_r = [(i, j) for i, j in zip(first_r, last_r) if j > i + 89]
+
+pr_l = [(i, j) for i, j in zip(first_l, last_l) if j > i + 9]
+pr_r = [(i, j) for i, j in zip(first_r, last_r) if j > i + 9]
+
+#create dictionaries to hold all the fia_l and fia_r names
+dict_of_fia_l = {}
+dict_of_fia_r = {}
+
+#loop around pr_l rows and populate each fia_l dataset into a dictionary
+for n in range(len(pr_l)):
+    i,j = pr_l[n]
+    key_name = 'fia_'+ str(n) + '_l'
+    #store fia_l data into temporary dataframe 
+    df_temp_l = fia_left.loc[i:j]
+    df_temp_l.insert(0, "Group", key_name, True)
+    dict_of_fia_l[key_name] = df_temp_l
+
+#loop around the pr_r rows and populate each fia_r dataset into a dictionary
+for n in range(len(pr_r)):
+    i,j = pr_r[n]
+    key_name = 'fia_'+ str(n) + '_r'
+    #store fia_r data into temporary dataframe
+    df_temp_r = fia_right.loc[i:j]
+    df_temp_r.insert(0, "Group", key_name, True)
+    dict_of_fia_r[key_name] = df_temp_r
+    
+#create a dataframe and populate with all the fia_l datasets
+fia_final_l = pd.concat(dict_of_fia_l, ignore_index=False)
+
+#create a dataframe and populate with all the fia_r datasets
+fia_final_r = pd.concat(dict_of_fia_r, ignore_index=False)
+
+#total number of rows to find no. of frames where animal investigated for 1.5+ seconds
+total_ROItime_l_f = len(fia_final_l)
+print(total_ROItime_l_f)
+
+total_ROItime_r_f = len(fia_final_r)
+print(total_ROItime_r_f)
+
+#in seconds
+total_ROItime_l_s = round(total_ROItime_l_f/30, 2)
+total_ROItime_r_s = round(total_ROItime_r_f/30, 2)
+
+#calculate total number of entries into each ROI
+number_entries_l = fia_final_l["Group"].nunique()
+number_entries_r = fia_final_r["Group"].nunique()
+
+print(total_ROItime_l_s)
+print(number_entries_r)
+
+#total no. of frames nose spent in ROIs 
+frames_OL = fia_both['in'+objs[0].name].sum()
+frames_OR = fia_both['in'+objs[1].name].sum()
+#totalframes = round((len(fia_both['in'+objs[0].name]))/60, 2)
+
+#time inside ROI in seconds
+time_OL = round(frames_OL/30, 2)
+time_OR = round(frames_OR/30, 2)
+
+#proportion of total time inside ROIs
+propframes_OL = round(fia_both['in'+objs[0].name].sum()/len(fia_both['in'+objs[0].name]), 2)
+propframes_OR = round(fia_both['in'+objs[1].name].sum()/len(fia_both['in'+objs[1].name]), 2)
+
+# Add new column to fia_both DataFrame indicating which ROI the nose is in
+fia_both['inA'] = fia_both['in'+objs[0].name].astype(bool)
+fia_both['inB'] = fia_both['in'+objs[1].name].astype(bool)
+
+# Add new column to fia_both DataFrame indicating which ROI the nose is in for each frame
+fia_both['ROI'] = ''
+fia_both.loc[fia_both['inA'], 'ROI'] = 'A'
+fia_both.loc[fia_both['inB'], 'ROI'] = 'B'
+
+# Save fia_both DataFrame to CSV file
+fia_both.to_csv(r'C:\Users\Kail\Downloads\OPL_Final\m03\fia_both_with_ROI.csv', index=True)
+
+
+#summarise locomotion 
+
+#create array with x y nose coordinates
+nose_xy_1 = sess_df['nose'].drop(columns='likelihood')
+pairs = nose_xy_1.to_numpy()
+
+
+#function to compare x y coordinates with previous frame and calculate difference
+def locomotion(pairs):
+    # loop over each pair of points and extract distances
+    dist = []
+    for n, pos in enumerate(pairs):
+        # Get a pair of points
+        if n == 0:  # get the position at time 0, velocity is 0
+            p0 = pos
+            dist.append(0)
+        else:
+            p1 = pos  # get position at current frame
+
+            # Calc distance
+            dist.append(np.abs(distance.euclidean(p0, p1)))
+
+            # Prepare for next iteration, current position becomes the old one and repeat
+            p0 = p1
+
+    return np.array(dist)
+#sum differences to find total distance moved in pixels and cm 
+px_moved_1 = locomotion(pairs)
+
+total_moved_px = px_moved_1.sum().round(2)
+total_moved_cm = round((total_moved_px * scale), 2)
+
+#calculate the discrimination index
+di = round(((total_ROItime_r_s - total_ROItime_l_s) / (total_ROItime_r_s + total_ROItime_l_s))*100, 2)
+
+px_moved_1
+
+#create a final df with summary of animal behaviour 
+
+#average time spent in L ROI (s)? - not for one animal ?
+#average time spent in R ROI (s)? - not for one animal ? 
+
+# final_df = pd.DataFrame([[mouse, session, group, familiar, novel, total_moved_cm, total_moved_px, total_ROItime_l_f, total_ROItime_r_f, total_ROItime_l_s, total_ROItime_r_s, frames_OL, propframes_OL, time_OL, frames_OR, propframes_OR, time_OR, number_entries_l, number_entries_r, di]],
+#                         columns=['mouse id', 'session', 'group', 'familiar', 'novel', 't_move_cm', 't_move_px', ('t_fr_' + left_obj), ('t_fr_' + right_obj), ('t_s_' + left_obj), ('t_s_' + right_obj), ('sum_fr_' + left_obj), ('prop_fr_' + left_obj), ('sum_s_' + left_obj), ('sum_fr_' + right_obj), ('prop_fr_' + left_obj), ('sum_s_' + right_obj), ('entries_' + left_obj), ('entries_' + right_obj), 'di'])
+final_df = pd.DataFrame([[mouse, session, group, familiar, novel, total_moved_cm, total_moved_px, total_ROItime_l_f, total_ROItime_r_f, total_ROItime_l_s, total_ROItime_r_s, frames_OL, propframes_OL, time_OL, frames_OR, propframes_OR, time_OR, number_entries_l, number_entries_r, di]],
+                        columns=['mouse id', 'session', 'group', 'familiar', 'novel', 't_move_cm', 't_move_px', ('t_fr_' + left_obj), ('t_fr_' + right_obj), ('t_s_' + left_obj), ('t_s_' + right_obj), ('sum_fr_' + left_obj), ('prop_fr_' + left_obj), ('sum_s_' + left_obj), ('sum_fr_' + right_obj), ('prop_fr_' + right_obj), ('sum_s_' + right_obj), ('entries_' + left_obj), ('entries_' + right_obj), 'di'])
+
+
+# save to csv
+final_name = mouse + session
+# final_df.to_csv(final_name+"results.csv", index=False) 
+# #specify save to folder?
+
+# final_df.head()
+
+# import os
+
+# # Specify the path to the directory where you want to save the file
+# directory = r'C:\Users\Kail\Downloads\OPL_Final'
+
+
+final_df.to_csv(r'C:\Users\Kail\Downloads\OPL_Final\m03' + final_name + '_results.csv', index=False)
+
+
+# # Create the directory if it doesn't exist
+# if not os.path.exists(directory):
+#     os.makedirs(directory)
+
+# # Define the filename for the CSV file
+# filename = f'{mouse}_{session}_results.csv'
+
+# # Construct the full path to the CSV file
+# fullpath = os.path.join(directory, filename)
+
+# # Save the DataFrame to the CSV file
+# final_df.to_csv(fullpath, index=False)
+
+# # Print the head of the DataFrame
+# print(final_df.head())
+
+
+
+
